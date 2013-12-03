@@ -206,9 +206,9 @@ static struct freq_attr *spear_cpufreq_attr[] = {
 
 static struct cpufreq_driver spear_cpufreq_driver = {
 	.name		= "cpufreq-spear",
-	.flags		= CPUFREQ_STICKY,
-	.verify		= spear_cpufreq_verify,
-	.target		= spear_cpufreq_target,
+	.flags		= CPUFREQ_STICKY | CPUFREQ_NEED_INITIAL_FREQ_CHECK,
+	.verify		= cpufreq_generic_frequency_table_verify,
+	.target_index	= spear_cpufreq_target,
 	.get		= spear_cpufreq_get,
 	.init		= spear_cpufreq_init,
 	.exit		= spear_cpufreq_exit,

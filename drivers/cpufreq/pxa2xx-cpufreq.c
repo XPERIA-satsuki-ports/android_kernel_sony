@@ -464,8 +464,9 @@ static int pxa_cpufreq_init(struct cpufreq_policy *policy)
 }
 
 static struct cpufreq_driver pxa_cpufreq_driver = {
-	.verify	= pxa_verify_policy,
-	.target	= pxa_set_target,
+	.flags	= CPUFREQ_NEED_INITIAL_FREQ_CHECK,
+	.verify	= cpufreq_generic_frequency_table_verify,
+	.target_index = pxa_set_target,
 	.init	= pxa_cpufreq_init,
 	.get	= pxa_cpufreq_get,
 	.name	= "PXA2xx",
