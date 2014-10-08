@@ -19,6 +19,11 @@
  *  Adaptive scheduling granularity, math enhancements by Peter Zijlstra
  *  Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
  */
+/*
+ * NOTE: This file has been modified by Sony Mobile Communications Inc.
+ * Modifications are Copyright (c) 2015 Sony Mobile Communications Inc,
+ * and licensed under the license of the file.
+ */
 
 #include <linux/latencytop.h>
 #include <linux/sched.h>
@@ -1578,8 +1583,10 @@ int sched_get_cpu_prefer_idle(int cpu)
 int sched_set_cpu_mostly_idle_load(int cpu, int mostly_idle_pct)
 {
 	struct rq *rq = cpu_rq(cpu);
+	int mostly_occupied_pct = real_to_pct(rq->mostly_occupied_load);
 
-	if (mostly_idle_pct < 0 || mostly_idle_pct > 100)
+	if (mostly_idle_pct < 0 || mostly_idle_pct > 100 ||
+	    mostly_idle_pct >= mostly_occupied_pct)
 		return -EINVAL;
 
 	rq->mostly_idle_load = pct_to_real(mostly_idle_pct);
@@ -1745,6 +1752,7 @@ static DEFINE_MUTEX(boost_mutex);
 
 static void boost_kick_cpus(void)
 {
+	u32 nr_running;
 	int i;
 
 	for_each_online_cpu(i) {
@@ -2014,6 +2022,8 @@ static int best_small_task_cpu(struct task_struct *p, int sync)
 			continue;
 		}
 
+		cpumask_clear_cpu(i, &search_cpu);
+
 		if (sched_cpu_high_irqload(i))
 			continue;
 
@@ -2174,12 +2184,12 @@ static int skip_cpu(struct rq *task_rq, struct rq *rq, int cpu,
  * Select a single cpu in cluster as target for packing, iff cluster frequency
  * is less than a threshold level
  */
-static int select_packing_target(struct task_struct *p, int best_cpu)
+static int select_packing_target(struct task_struct *p, int best_cpu, int sync)
 {
 	struct rq *rq = cpu_rq(best_cpu);
 	struct cpumask search_cpus;
 	int i;
-	int min_cost = INT_MAX;
+	u64 min_aggregate = ULLONG_MAX;
 	int target = best_cpu;
 
 	if (cpu_cur_freq(best_cpu) >= cpu_mostly_idle_freq(best_cpu))
@@ -2194,11 +2204,38 @@ static int select_packing_target(struct task_struct *p, int best_cpu)
 
 	/* Pick the first lowest power cpu as target */
 	for_each_cpu(i, &search_cpus) {
-		int cost = power_cost(scale_load_to_cpu(task_load(p), i), i);
+		u64 load = cpu_load_sync(i, sync);
+		u64 anticipated_load = scale_load_to_cpu(task_load(p), i) +
+					load;
 
-		if (cost < min_cost && !sched_cpu_high_irqload(i)) {
-			target = i;
-			min_cost = cost;
+		if (likely(anticipated_load <= rq->mostly_occupied_load)) {
+			int high_irqload = sched_cpu_high_irqload(i);
+			int cstate = cpu_rq(i)->cstate;
+			u64 aggregate;
+			int cost;
+
+			/*
+			 * Skip CPU with high IRQ load.
+			 */
+			if (unlikely(high_irqload))
+				continue;
+
+			cost = power_cost(scale_load_to_cpu(task_load(p), i), i);
+
+			/*
+			 * Here we try to find CPU with least power cost,
+			 * after that fall down to CPUs with the lowest C-state
+			 * (0 -> active state), finally select least loaded CPU.
+			 *
+			 * aggregate: |------32b------|--8b--|----24b----|
+			 */
+			aggregate = ((u64) cost << 32) | ((u32) cstate << 24) |
+				((u32) load & (UINT_MAX >> 8));
+
+			if (aggregate < min_aggregate) {
+				min_aggregate = aggregate;
+				target = i;
+			}
 		}
 	}
 
@@ -2270,7 +2307,10 @@ static int select_best_cpu(struct task_struct *p, int target, int reason,
 		sync = 0;
 	}
 
-	if (small_task && !boost && !sync) {
+	if (boost && task_sched_boost(p))
+		small_task = 0;
+
+	if (small_task && !sync) {
 		best_cpu = best_small_task_cpu(p, sync);
 		prefer_idle = 0;	/* For sched_task_load tracepoint */
 		goto done;
@@ -3895,6 +3935,19 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+static unsigned int Lgentle_fair_sleepers = 0;
+static unsigned int Larch_power = 0;
+
+void relay_gfs(unsigned int gfs)
+{
+	Lgentle_fair_sleepers = gfs;
+}
+
+void relay_ap(unsigned int ap)
+{
+	Larch_power = ap;
+}
+
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
@@ -3917,7 +3970,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 		 * Halve their sleep time's effect, to allow
 		 * for a gentler effect of sleepers:
 		 */
-		if (sched_feat(GENTLE_FAIR_SLEEPERS))
+		if (Lgentle_fair_sleepers)
 			thresh >>= 1;
 
 		vruntime -= thresh;
@@ -3934,7 +3987,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	/*
 	 * Update the normalized vruntime before updating min_vruntime
-	 * through callig update_curr().
+	 * through calling update_curr().
 	 */
 	if (!(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_WAKING))
 		se->vruntime += cfs_rq->min_vruntime;
@@ -5134,6 +5187,10 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	if (!se) {
 		update_rq_runnable_avg(rq, rq->nr_running);
 		inc_nr_running(rq);
+
+		if (unlikely(p->nr_cpus_allowed == 1))
+			rq->nr_pinned_tasks++;
+
 		inc_rq_hmp_stats(rq, p, 1);
 	}
 	hrtick_update(rq);
@@ -5197,6 +5254,10 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 	if (!se) {
 		dec_nr_running(rq);
+
+		if (unlikely(p->nr_cpus_allowed == 1))
+			rq->nr_pinned_tasks--;
+
 		update_rq_runnable_avg(rq, 1);
 		dec_rq_hmp_stats(rq, p, 1);
 	}
@@ -6738,7 +6799,7 @@ static void update_cpu_power(struct sched_domain *sd, int cpu)
 	struct sched_group *sdg = sd->groups;
 
 	if ((sd->flags & SD_SHARE_CPUPOWER) && weight > 1) {
-		if (sched_feat(ARCH_POWER))
+		if (Larch_power)
 			power *= arch_scale_smt_power(sd, cpu);
 		else
 			power *= default_scale_smt_power(sd, cpu);
@@ -6748,7 +6809,7 @@ static void update_cpu_power(struct sched_domain *sd, int cpu)
 
 	sdg->sgp->power_orig = power;
 
-	if (sched_feat(ARCH_POWER))
+	if (Larch_power)
 		power *= arch_scale_freq_power(sd, cpu);
 	else
 		power *= default_scale_freq_power(sd, cpu);
@@ -8749,6 +8810,24 @@ static void task_move_group_fair(struct task_struct *p, int on_rq)
 	}
 }
 
+static void set_cpus_allowed_fair(struct task_struct *p, const struct cpumask *new_mask)
+{
+	int nr_cpus_allowed;
+	struct rq *rq;
+
+	if (p->on_rq) {
+		nr_cpus_allowed = cpumask_weight(new_mask);
+		rq = task_rq(p);
+
+		if (nr_cpus_allowed == 1 && p->nr_cpus_allowed > 1)
+			rq->nr_pinned_tasks++;
+		else if (nr_cpus_allowed > 1 && p->nr_cpus_allowed == 1)
+			rq->nr_pinned_tasks--;
+	}
+
+	/* 'new_mask' is applied in core.c */
+}
+
 void free_fair_sched_group(struct task_group *tg)
 {
 	int i;
@@ -8959,6 +9038,7 @@ const struct sched_class fair_sched_class = {
 	.inc_hmp_sched_stats	= inc_hmp_sched_stats_fair,
 	.dec_hmp_sched_stats	= dec_hmp_sched_stats_fair,
 #endif
+	.set_cpus_allowed	= set_cpus_allowed_fair,
 };
 
 #ifdef CONFIG_SCHED_DEBUG
