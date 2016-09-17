@@ -1,6 +1,6 @@
 /*Qualcomm Secure Execution Environment Communicator (QSEECOM) driver
  *
- * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -137,7 +137,9 @@ struct qseecom_registered_app_list {
 	u32  app_id;
 	u32  ref_cnt;
 	char app_name[MAX_APP_NAME_SIZE];
+#ifndef CONFIG_ARCH_MSM8974
 	u32  app_arch;
+#endif
 	bool app_blocked;
 	u32  blocked_on_listener_id;
 };
@@ -231,7 +233,9 @@ struct qseecom_client_handle {
 	size_t sb_length;
 	struct ion_handle *ihandle;		/* Retrieve phy addr */
 	char app_name[MAX_APP_NAME_SIZE];
+#ifndef CONFIG_ARCH_MSM8974
 	u32  app_arch;
+#endif
 	struct qseecom_sec_buf_fd_info sec_buf_fd[MAX_ION_FD];
 };
 
@@ -1697,9 +1701,7 @@ static int __qseecom_check_app_exists(struct qseecom_check_app_ireq req)
 	spin_lock_irqsave(&qseecom.registered_app_list_lock, flags);
 	list_for_each_entry(entry,
 			&qseecom.registered_app_list_head, list) {
-		if (!memcmp(entry->app_name,
-				req.app_name,
-				strlen(req.app_name))) {
+		if (!strcmp(entry->app_name, req.app_name)) {
 			found_app = true;
 			break;
 		}
@@ -1765,8 +1767,12 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
 
 	/* Check and load cmnlib */
 	if (qseecom.qsee_version > QSEEE_VERSION_00) {
+#ifndef CONFIG_ARCH_MSM8974
 		if (!qseecom.commonlib_loaded &&
 				load_img_req.app_arch == ELFCLASS32) {
+#else
+		if (!qseecom.commonlib_loaded) {
+#endif
 			ret = qseecom_load_commonlib_image(data, "cmnlib");
 			if (ret) {
 				pr_err("failed to load cmnlib\n");
@@ -1776,6 +1782,7 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
 			pr_debug("cmnlib is loaded\n");
 		}
 
+#ifndef CONFIG_ARCH_MSM8974
 		if (!qseecom.commonlib64_loaded &&
 				load_img_req.app_arch == ELFCLASS64) {
 			ret = qseecom_load_commonlib_image(data, "cmnlib64");
@@ -1786,6 +1793,7 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
 			qseecom.commonlib64_loaded = true;
 			pr_debug("cmnlib64 is loaded\n");
 		}
+#endif
 	}
 
 	if (qseecom.support_bus_scaling) {
@@ -1918,8 +1926,21 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
 		}
 		entry->app_id = app_id;
 		entry->ref_cnt = 1;
+#ifndef CONFIG_ARCH_MSM8974
 		entry->app_arch = load_img_req.app_arch;
-		strlcpy(entry->app_name, load_img_req.img_name,
+#endif
+
+		/*
+		* keymaster app may be first loaded as "keymaste" by qseecomd,
+		* and then used as "keymaster" on some targets. To avoid app
+		* name checking error, register "keymaster" into app_list and
+		* thread private data.
+		*/
+		if (!strcmp(load_img_req.img_name, "keymaste"))
+			strlcpy(entry->app_name, "keymaster",
+					MAX_APP_NAME_SIZE);
+		else
+			strlcpy(entry->app_name, load_img_req.img_name,
 					MAX_APP_NAME_SIZE);
 		entry->app_blocked = false;
 		entry->blocked_on_listener_id = 0;
@@ -1937,8 +1958,14 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
 		(char *)(load_img_req.img_name));
 	}
 	data->client.app_id = app_id;
+#ifndef CONFIG_ARCH_MSM8974
 	data->client.app_arch = load_img_req.app_arch;
-	strlcpy(data->client.app_name, load_img_req.img_name,
+#endif
+
+	if (!strcmp(load_img_req.img_name, "keymaste"))
+		strlcpy(data->client.app_name, "keymaster", MAX_APP_NAME_SIZE);
+	else
+		strlcpy(data->client.app_name, load_img_req.img_name,
 					MAX_APP_NAME_SIZE);
 	load_img_req.app_id = app_id;
 	if (copy_to_user(argp, &load_img_req, sizeof(load_img_req))) {
@@ -2006,9 +2033,8 @@ static int qseecom_unload_app(struct qseecom_dev_handle *data,
 		list_for_each_entry(ptr_app, &qseecom.registered_app_list_head,
 									list) {
 			if (ptr_app->app_id == data->client.app_id) {
-				if (!memcmp((void *)ptr_app->app_name,
-					(void *)data->client.app_name,
-					strlen(data->client.app_name))) {
+				if (!strcmp((void *)ptr_app->app_name,
+					(void *)data->client.app_name)) {
 					found_app = true;
 					if (app_crash || ptr_app->ref_cnt == 1)
 						unload = true;
@@ -2525,7 +2551,6 @@ static int __qseecom_send_cmd(struct qseecom_dev_handle *data,
 	unsigned long flags;
 	struct qseecom_registered_app_list *ptr_app;
 	bool found_app = false;
-	int name_len = 0;
 	void *cmd_buf = NULL;
 	size_t cmd_len;
 
@@ -2534,11 +2559,8 @@ static int __qseecom_send_cmd(struct qseecom_dev_handle *data,
 	spin_lock_irqsave(&qseecom.registered_app_list_lock, flags);
 	list_for_each_entry(ptr_app, &qseecom.registered_app_list_head,
 							list) {
-		name_len = min(strlen(data->client.app_name),
-				strlen(ptr_app->app_name));
 		if ((ptr_app->app_id == data->client.app_id) &&
-			 (!memcmp(ptr_app->app_name,
-				data->client.app_name, name_len))) {
+			 (!strcmp(ptr_app->app_name, data->client.app_name))) {
 			found_app = true;
 			break;
 		}
@@ -2562,6 +2584,7 @@ static int __qseecom_send_cmd(struct qseecom_dev_handle *data,
 		send_data_req.rsp_len = req->resp_len;
 		cmd_buf = (void *)&send_data_req;
 		cmd_len = sizeof(struct qseecom_client_send_data_ireq);
+#ifndef CONFIG_ARCH_MSM8974
 	} else {
 		send_data_req_64bit.qsee_cmd_id =
 					QSEOS_CLIENT_SEND_DATA_COMMAND;
@@ -2588,6 +2611,7 @@ static int __qseecom_send_cmd(struct qseecom_dev_handle *data,
 		}
 		cmd_buf = (void *)&send_data_req_64bit;
 		cmd_len = sizeof(struct qseecom_client_send_data_64bit_ireq);
+#endif
 	}
 
 	msm_ion_do_cache_op(qseecom.ion_clnt, data->client.ihandle,
@@ -2756,9 +2780,13 @@ static int __qseecom_update_cmd_buf(void *msg, bool cleanup,
 			uint32_t *update;
 			if (__boundary_checks_offset(req, lstnr_resp, data, i))
 				goto err;
+#ifndef CONFIG_ARCH_MSM8974
 			if ((data->type == QSEECOM_CLIENT_APP &&
 				(data->client.app_arch == ELFCLASS32 ||
 				data->client.app_arch == ELFCLASS64)) ||
+#else
+			if ((data->type == QSEECOM_CLIENT_APP) ||
+#endif
 				(data->type == QSEECOM_LISTENER_SERVICE)) {
 				/*
 				 * Check if sg list phy add region is under 4GB
@@ -2777,8 +2805,10 @@ static int __qseecom_update_cmd_buf(void *msg, bool cleanup,
 				*update = cleanup ? 0 :
 					(uint32_t)sg_dma_address(sg_ptr->sgl);
 			} else {
+#ifndef CONFIG_ARCH_MSM8974
 				pr_err("QSEE app arch %u is not supported\n",
 							data->client.app_arch);
+#endif
 				goto err;
 			}
 			len += (uint32_t)sg->length;
@@ -2810,9 +2840,13 @@ static int __qseecom_update_cmd_buf(void *msg, bool cleanup,
 					goto err;
 				}
 			}
+#ifndef CONFIG_ARCH_MSM8974
 			if ((data->type == QSEECOM_CLIENT_APP &&
 				(data->client.app_arch == ELFCLASS32 ||
 				data->client.app_arch == ELFCLASS64)) ||
+#else
+			if ((data->type == QSEECOM_CLIENT_APP) ||
+#endif
 				(data->type == QSEECOM_LISTENER_SERVICE)) {
 				update = (struct qseecom_sg_entry *)field;
 				for (j = 0; j < sg_ptr->nents; j++) {
@@ -2838,8 +2872,10 @@ static int __qseecom_update_cmd_buf(void *msg, bool cleanup,
 					sg = sg_next(sg);
 				}
 			} else {
+#ifndef CONFIG_ARCH_MSM8974
 				pr_err("QSEE app arch %u is not supported\n",
 							data->client.app_arch);
+#endif
 					goto err;
 			}
 		}
@@ -3208,8 +3244,12 @@ static int __qseecom_get_fw_size(char *appname, uint32_t *fw_size,
 		ret = -EIO;
 		goto err;
 	}
-	*app_arch = *(unsigned char *)(fw_entry->data + EI_CLASS);
 	*fw_size = fw_entry->size;
+#ifdef CONFIG_ARCH_MSM8974
+	*app_arch = ELFCLASS32;
+#else
+	*app_arch = *(unsigned char *)(fw_entry->data + EI_CLASS);
+#endif
 	if (*app_arch == ELFCLASS32) {
 		ehdr = (struct elf32_hdr *)fw_entry->data;
 		num_images = ehdr->e_phnum;
@@ -3367,10 +3407,13 @@ static int __qseecom_load_fw(struct qseecom_dev_handle *data, char *appname)
 
 	if (__qseecom_get_fw_size(appname, &fw_size, &app_arch))
 		return -EIO;
+#ifndef CONFIG_ARCH_MSM8974
 	data->client.app_arch = app_arch;
+#endif
 
 	/* Check and load cmnlib */
 	if (qseecom.qsee_version > QSEEE_VERSION_00) {
+
 		if (!qseecom.commonlib_loaded && app_arch == ELFCLASS32) {
 			ret = qseecom_load_commonlib_image(data, "cmnlib");
 			if (ret) {
@@ -3381,6 +3424,7 @@ static int __qseecom_load_fw(struct qseecom_dev_handle *data, char *appname)
 			pr_debug("cmnlib is loaded\n");
 		}
 
+#ifndef CONFIG_ARCH_MSM8974
 		if (!qseecom.commonlib64_loaded && app_arch == ELFCLASS64) {
 			ret = qseecom_load_commonlib_image(data, "cmnlib64");
 			if (ret) {
@@ -3390,6 +3434,7 @@ static int __qseecom_load_fw(struct qseecom_dev_handle *data, char *appname)
 			qseecom.commonlib64_loaded = true;
 			pr_debug("cmnlib64 is loaded\n");
 		}
+#endif
 	}
 
 	ret = __qseecom_allocate_img_data(&ihandle, &img_data, fw_size, &pa);
@@ -3742,7 +3787,9 @@ int qseecom_start_app(struct qseecom_handle **handle,
 			ret = -EIO;
 			goto err;
 		}
+#ifndef CONFIG_ARCH_MSM8974
 		entry->app_arch = app_arch;
+#endif
 		entry->app_blocked = false;
 		entry->blocked_on_listener_id = 0;
 		spin_lock_irqsave(&qseecom.registered_app_list_lock, flags);
@@ -4501,7 +4548,9 @@ static int qseecom_query_app_loaded(struct qseecom_dev_handle *data,
 		list_for_each_entry(entry,
 				&qseecom.registered_app_list_head, list){
 			if (entry->app_id == ret) {
+#ifndef CONFIG_ARCH_MSM8974
 				app_arch = entry->app_arch;
+#endif
 				entry->ref_cnt++;
 				found_app = true;
 				break;
@@ -4511,6 +4560,7 @@ static int qseecom_query_app_loaded(struct qseecom_dev_handle *data,
 				&qseecom.registered_app_list_lock, flags);
 		data->client.app_id = ret;
 		query_req.app_id = ret;
+#ifndef CONFIG_ARCH_MSM8974
 		if (app_arch) {
 			data->client.app_arch = app_arch;
 			query_req.app_arch = app_arch;
@@ -4520,6 +4570,7 @@ static int qseecom_query_app_loaded(struct qseecom_dev_handle *data,
 		}
 		strlcpy(data->client.app_name, query_req.app_name,
 				MAX_APP_NAME_SIZE);
+#endif
 		/*
 		 * If app was loaded by appsbl before and was not registered,
 		 * regiser this app now.
@@ -4534,7 +4585,9 @@ static int qseecom_query_app_loaded(struct qseecom_dev_handle *data,
 			}
 			entry->app_id = ret;
 			entry->ref_cnt = 1;
+#ifndef CONFIG_ARCH_MSM8974
 			entry->app_arch = data->client.app_arch;
+#endif
 			strlcpy(entry->app_name, data->client.app_name,
 				MAX_APP_NAME_SIZE);
 			entry->app_blocked = false;
@@ -5569,9 +5622,7 @@ static int __qseecom_qteec_issue_cmd(struct qseecom_dev_handle *data,
 	list_for_each_entry(ptr_app, &qseecom.registered_app_list_head,
 							list) {
 		if ((ptr_app->app_id == data->client.app_id) &&
-			 (!memcmp(ptr_app->app_name,
-				data->client.app_name,
-				strlen(ptr_app->app_name)))) {
+			 (!strcmp(ptr_app->app_name, data->client.app_name))) {
 			found_app = true;
 			break;
 		}
@@ -5594,6 +5645,7 @@ static int __qseecom_qteec_issue_cmd(struct qseecom_dev_handle *data,
 		ireq.resp_len = req->resp_len;
 		cmd_buf = (void *)&ireq;
 		cmd_len = sizeof(struct qseecom_qteec_ireq);
+#ifndef CONFIG_ARCH_MSM8974
 	} else {
 		ireq_64bit.qsee_cmd_id = cmd_id;
 		ireq_64bit.app_id = data->client.app_id;
@@ -5617,6 +5669,7 @@ static int __qseecom_qteec_issue_cmd(struct qseecom_dev_handle *data,
 		}
 		cmd_buf = (void *)&ireq_64bit;
 		cmd_len = sizeof(struct qseecom_qteec_64bit_ireq);
+#endif
 	}
 
 	if ((cmd_id == QSEOS_TEE_OPEN_SESSION) ||
@@ -5740,9 +5793,7 @@ static int qseecom_qteec_invoke_modfd_cmd(struct qseecom_dev_handle *data,
 	list_for_each_entry(ptr_app, &qseecom.registered_app_list_head,
 							list) {
 		if ((ptr_app->app_id == data->client.app_id) &&
-			 (!memcmp(ptr_app->app_name,
-				data->client.app_name,
-				strlen(ptr_app->app_name)))) {
+			 (!strcmp(ptr_app->app_name, data->client.app_name))) {
 			found_app = true;
 			break;
 		}

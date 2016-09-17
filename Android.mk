@@ -16,7 +16,7 @@
 # Android makefile to build kernel as a part of Android Build
 
 ifeq ($(BUILD_KERNEL),true)
-ifeq ($(filter-out amami aries castor castor_windy eagle flamingo honami ivy karin karin_windy leo satsuki scorpion scorpion_windy seagull sirius sumire suzu suzuran tianchi tianchi_dsds togari tulip,$(TARGET_DEVICE)),)
+ifeq ($(filter-out kanuti kitakami loire rhine shinano,$(PRODUCT_PLATFORM)),)
 
 KERNEL_SRC := $(call my-dir)
 
@@ -136,7 +136,11 @@ define clean-module-folder
 endef
 
 ifeq ($(HOST_OS),darwin)
+ifeq (1,$(filter 1,$(shell echo "$$(( $(PLATFORM_SDK_VERSION) >= 24 ))" )))
+  MAKE_FLAGS += C_INCLUDE_PATH=$(ANDROID_BUILD_TOP)/external/elfutils/libelf/
+else
   MAKE_FLAGS += C_INCLUDE_PATH=$(ANDROID_BUILD_TOP)/external/elfutils/src/libelf/
+endif
 endif
 
 ifeq ($(TARGET_KERNEL_MODULES),)
