@@ -570,6 +570,12 @@ config HOTPLUG_CPU
 	  Say Y here to experiment with turning CPUs off and on.  CPUs
 	  can be controlled through /sys/devices/system/cpu.
 
+if HOTPLUG_CPU
+
+source arch/arm64/hotplug/Kconfig
+
+endif
+
 source kernel/Kconfig.preempt
 
 config SWP_EMULATE
