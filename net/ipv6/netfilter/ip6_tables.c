@@ -1321,6 +1321,10 @@ do_add_counters(struct net *net, const void __user *user, unsigned int len,
 	struct xt_counters_info tmp;
 	struct xt_counters *paddc;
 	struct xt_table *t;
+	unsigned int num_counters;
+	const char *name;
+	int size;
+	void *ptmp;
 	const struct xt_table_info *private;
 	int ret = 0;
 	const void *loc_cpu_entry;
